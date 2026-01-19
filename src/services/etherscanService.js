@@ -4,6 +4,24 @@ import { EXPLORER_APIS } from '../config/api';
 // Rate limiting helper - Etherscan free tier: 5 calls/second
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// Timeout wrapper for fetch requests
+const fetchWithTimeout = async (url, timeout = 10000) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error('Request timeout');
+    }
+    throw error;
+  }
+};
+
 /**
  * Get ETH balance for an address
  */
@@ -11,8 +29,9 @@ export const getEthBalance = async (address, chain = 'ethereum') => {
   const { url, apiKey, chainId } = EXPLORER_APIS[chain] || EXPLORER_APIS.ethereum;
   
   try {
-    const response = await fetch(
-      `${url}?chainid=${chainId}&module=account&action=balance&address=${address}&tag=latest&apikey=${apiKey}`
+    const response = await fetchWithTimeout(
+      `${url}?chainid=${chainId}&module=account&action=balance&address=${address}&tag=latest&apikey=${apiKey}`,
+      8000 // 8 second timeout
     );
     
     const data = await response.json();
@@ -34,6 +53,11 @@ export const getEthBalance = async (address, chain = 'ethereum') => {
     throw new Error(data.result || data.message || 'Failed to fetch balance');
   } catch (error) {
     console.error('getEthBalance error:', error);
+    // Return 0 instead of throwing on timeout/network errors
+    if (error.message === 'Request timeout') {
+      console.warn('ETH balance request timed out');
+      return 0;
+    }
     throw error;
   }
 };
@@ -44,12 +68,10 @@ export const getEthBalance = async (address, chain = 'ethereum') => {
 export const getTokenBalances = async (address, chain = 'ethereum') => {
   const { url, apiKey, chainId } = EXPLORER_APIS[chain] || EXPLORER_APIS.ethereum;
   
-  // Add delay to avoid rate limiting
-  await delay(200);
-  
   try {
-    const response = await fetch(
-      `${url}?chainid=${chainId}&module=account&action=tokentx&address=${address}&page=1&offset=100&sort=desc&apikey=${apiKey}`
+    const response = await fetchWithTimeout(
+      `${url}?chainid=${chainId}&module=account&action=tokentx&address=${address}&page=1&offset=100&sort=desc&apikey=${apiKey}`,
+      10000 // 10 second timeout
     );
     
     const data = await response.json();
@@ -98,12 +120,10 @@ export const getTokenBalances = async (address, chain = 'ethereum') => {
 export const getTokenBalance = async (address, contractAddress, chain = 'ethereum') => {
   const { url, apiKey, chainId } = EXPLORER_APIS[chain] || EXPLORER_APIS.ethereum;
   
-  // Add delay to avoid rate limiting
-  await delay(200);
-  
   try {
-    const response = await fetch(
-      `${url}?chainid=${chainId}&module=account&action=tokenbalance&contractaddress=${contractAddress}&address=${address}&tag=latest&apikey=${apiKey}`
+    const response = await fetchWithTimeout(
+      `${url}?chainid=${chainId}&module=account&action=tokenbalance&contractaddress=${contractAddress}&address=${address}&tag=latest&apikey=${apiKey}`,
+      5000 // 5 second timeout per token
     );
     
     const data = await response.json();
@@ -120,14 +140,46 @@ export const getTokenBalance = async (address, contractAddress, chain = 'ethereu
 };
 
 /**
+ * Get multiple token balances in parallel batches
+ * This is faster than sequential calls
+ */
+export const getTokenBalancesBatch = async (address, tokens, chain = 'ethereum') => {
+  const BATCH_SIZE = 5; // Process 5 tokens at a time to avoid rate limiting
+  const results = [];
+  
+  for (let i = 0; i < tokens.length; i += BATCH_SIZE) {
+    const batch = tokens.slice(i, i + BATCH_SIZE);
+    
+    // Process batch in parallel
+    const batchResults = await Promise.all(
+      batch.map(async (token) => {
+        const rawBalance = await getTokenBalance(address, token.contractAddress, chain);
+        const balance = parseFloat(rawBalance) / Math.pow(10, token.decimals || 18);
+        return { ...token, balance };
+      })
+    );
+    
+    results.push(...batchResults);
+    
+    // Small delay between batches to avoid rate limiting
+    if (i + BATCH_SIZE < tokens.length) {
+      await delay(200);
+    }
+  }
+  
+  return results;
+};
+
+/**
  * Get transaction history
  */
 export const getTransactionHistory = async (address, chain = 'ethereum') => {
   const { url, apiKey, chainId } = EXPLORER_APIS[chain] || EXPLORER_APIS.ethereum;
   
   try {
-    const response = await fetch(
-      `${url}?chainid=${chainId}&module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=50&sort=desc&apikey=${apiKey}`
+    const response = await fetchWithTimeout(
+      `${url}?chainid=${chainId}&module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=50&sort=desc&apikey=${apiKey}`,
+      10000 // 10 second timeout
     );
     
     const data = await response.json();

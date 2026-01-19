@@ -25,8 +25,27 @@ const TOKEN_ID_MAP = {
   'LDO': 'lido-dao',
 };
 
+// Timeout wrapper for fetch requests
+const fetchWithTimeout = async (url, timeout = 8000) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error('Request timeout');
+    }
+    throw error;
+  }
+};
+
 /**
  * Get prices for multiple tokens
+ * With timeout and better error handling
  */
 export const getTokenPrices = async (symbols) => {
   const ids = symbols
@@ -39,11 +58,24 @@ export const getTokenPrices = async (symbols) => {
   }
 
   try {
-    const response = await fetch(
-      `${API_ENDPOINTS.COINGECKO}/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true&include_market_cap=true`
+    const response = await fetchWithTimeout(
+      `${API_ENDPOINTS.COINGECKO}/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true&include_market_cap=true`,
+      8000 // 8 second timeout
     );
 
+    // Check if rate limited
+    if (response.status === 429) {
+      console.warn('CoinGecko rate limited, returning empty prices');
+      return {};
+    }
+
     const data = await response.json();
+    
+    // Check for error response
+    if (data.error) {
+      console.warn('CoinGecko API error:', data.error);
+      return {};
+    }
     
     // Map back to symbols
     const prices = {};
@@ -78,11 +110,21 @@ export const getTokenPrice = async (symbol) => {
  */
 export const getTopCryptos = async (limit = 100) => {
   try {
-    const response = await fetch(
-      `${API_ENDPOINTS.COINGECKO}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${limit}&page=1&sparkline=false&price_change_percentage=24h`
+    const response = await fetchWithTimeout(
+      `${API_ENDPOINTS.COINGECKO}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${limit}&page=1&sparkline=false&price_change_percentage=24h`,
+      10000
     );
 
+    if (response.status === 429) {
+      console.warn('CoinGecko rate limited');
+      return [];
+    }
+
     const data = await response.json();
+    
+    if (!Array.isArray(data)) {
+      return [];
+    }
     
     return data.map(coin => ({
       id: coin.id,
@@ -105,11 +147,21 @@ export const getTopCryptos = async (limit = 100) => {
  */
 export const getPriceHistory = async (coinId, days = 7) => {
   try {
-    const response = await fetch(
-      `${API_ENDPOINTS.COINGECKO}/coins/${coinId}/market_chart?vs_currency=usd&days=${days}`
+    const response = await fetchWithTimeout(
+      `${API_ENDPOINTS.COINGECKO}/coins/${coinId}/market_chart?vs_currency=usd&days=${days}`,
+      10000
     );
 
+    if (response.status === 429) {
+      console.warn('CoinGecko rate limited');
+      return [];
+    }
+
     const data = await response.json();
+    
+    if (!data.prices) {
+      return [];
+    }
     
     return data.prices.map(([timestamp, price]) => ({
       timestamp: new Date(timestamp),

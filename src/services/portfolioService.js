@@ -1,7 +1,7 @@
 // Portfolio Service
 // Integrates Etherscan and CoinGecko APIs
 
-import { getEthBalance, getTokenBalances, getTokenBalance } from './etherscanService';
+import { getEthBalance, getTokenBalances, getTokenBalancesBatch } from './etherscanService';
 import { getTokenPrices } from './priceService';
 
 // Token icons mapping
@@ -22,68 +22,91 @@ const TOKEN_ICONS = {
 
 /**
  * Get full portfolio with real data
+ * Optimized for faster loading with parallel processing and timeouts
  */
 export const getPortfolio = async (address, chain = 'ethereum') => {
+  const TIMEOUT_MS = 15000; // 15 second overall timeout
+  
+  // Create a timeout promise
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Portfolio fetch timeout - try again')), TIMEOUT_MS);
+  });
+
   try {
-    const portfolio = [];
+    // Race against timeout
+    return await Promise.race([
+      fetchPortfolioData(address, chain),
+      timeoutPromise
+    ]);
+  } catch (error) {
+    console.error('Failed to fetch portfolio:', error);
+    throw error;
+  }
+};
 
-    // 1. Get native token balance (ETH/MATIC/BNB)
-    const nativeBalance = await getEthBalance(address, chain);
-    const nativeSymbol = chain === 'polygon' ? 'MATIC' : chain === 'bsc' ? 'BNB' : 'ETH';
-    
-    if (nativeBalance > 0) {
-      portfolio.push({
-        symbol: nativeSymbol,
-        name: nativeSymbol === 'ETH' ? 'Ethereum' : nativeSymbol === 'MATIC' ? 'Polygon' : 'BNB',
-        balance: nativeBalance.toFixed(6),
-        contractAddress: null,
-        isNative: true,
-      });
-    }
+/**
+ * Internal function to fetch portfolio data
+ */
+const fetchPortfolioData = async (address, chain) => {
+  const portfolio = [];
 
-    // 2. Get ERC-20 tokens using Etherscan
-    const tokens = await getTokenBalances(address, chain);
+  // 1. Get native token balance and token list in parallel
+  const [nativeBalance, tokens] = await Promise.all([
+    getEthBalance(address, chain).catch(() => 0),
+    getTokenBalances(address, chain).catch(() => [])
+  ]);
+  
+  const nativeSymbol = chain === 'polygon' ? 'MATIC' : chain === 'bsc' ? 'BNB' : 'ETH';
+  
+  if (nativeBalance > 0) {
+    portfolio.push({
+      symbol: nativeSymbol,
+      name: nativeSymbol === 'ETH' ? 'Ethereum' : nativeSymbol === 'MATIC' ? 'Polygon' : 'BNB',
+      balance: nativeBalance.toFixed(6),
+      contractAddress: null,
+      isNative: true,
+    });
+  }
+
+  // 2. Get ERC-20 token balances in parallel batches (much faster!)
+  const limitedTokens = tokens.slice(0, 10); // Limit to 10 tokens for faster loading
+  
+  if (limitedTokens.length > 0) {
+    const tokenBalances = await getTokenBalancesBatch(address, limitedTokens, chain);
     
-    for (const token of tokens.slice(0, 20)) { // Limit to 20 tokens
-      const rawBalance = await getTokenBalance(address, token.contractAddress, chain);
-      const balance = parseFloat(rawBalance) / Math.pow(10, token.decimals || 18);
-      
-      if (balance > 0.0001) { // Filter dust
+    for (const token of tokenBalances) {
+      if (token.balance > 0.0001) { // Filter dust
         portfolio.push({
           symbol: token.symbol,
           name: token.name,
-          balance: balance.toFixed(6),
+          balance: token.balance.toFixed(6),
           contractAddress: token.contractAddress,
           isNative: false,
         });
       }
     }
-
-    // 3. Get prices for all tokens
-    const symbols = portfolio.map(t => t.symbol);
-    const prices = await getTokenPrices(symbols);
-
-    // 4. Combine data
-    const portfolioWithPrices = portfolio.map(token => {
-      const priceData = prices[token.symbol.toUpperCase()] || { price: 0, change24h: 0 };
-      const value = parseFloat(token.balance) * priceData.price;
-
-      return {
-        ...token,
-        price: priceData.price,
-        value: value,
-        change24h: priceData.change24h || 0,
-        icon: token.logo || TOKEN_ICONS[token.symbol.toUpperCase()] || TOKEN_ICONS.DEFAULT,
-      };
-    });
-
-    // Sort by value (highest first)
-    return portfolioWithPrices.sort((a, b) => b.value - a.value);
-
-  } catch (error) {
-    console.error('Failed to fetch portfolio:', error);
-    throw error;
   }
+
+  // 3. Get prices for all tokens
+  const symbols = portfolio.map(t => t.symbol);
+  const prices = await getTokenPrices(symbols).catch(() => ({}));
+
+  // 4. Combine data
+  const portfolioWithPrices = portfolio.map(token => {
+    const priceData = prices[token.symbol.toUpperCase()] || { price: 0, change24h: 0 };
+    const value = parseFloat(token.balance) * priceData.price;
+
+    return {
+      ...token,
+      price: priceData.price,
+      value: value,
+      change24h: priceData.change24h || 0,
+      icon: token.logo || TOKEN_ICONS[token.symbol.toUpperCase()] || TOKEN_ICONS.DEFAULT,
+    };
+  });
+
+  // Sort by value (highest first)
+  return portfolioWithPrices.sort((a, b) => b.value - a.value);
 };
 
 /**
