@@ -23,9 +23,14 @@ const TOKEN_ICONS = {
 /**
  * Get full portfolio with real data
  * Optimized for faster loading with parallel processing and timeouts
+ * @param {string} address - Wallet address
+ * @param {string} chain - Blockchain network
+ * @param {function} onStatus - Callback for status updates
  */
-export const getPortfolio = async (address, chain = 'ethereum') => {
+export const getPortfolio = async (address, chain = 'ethereum', onStatus = () => {}) => {
   const TIMEOUT_MS = 15000; // 15 second overall timeout
+  
+  onStatus('⏳ Starting portfolio fetch...');
   
   // Create a timeout promise
   const timeoutPromise = new Promise((_, reject) => {
@@ -35,7 +40,7 @@ export const getPortfolio = async (address, chain = 'ethereum') => {
   try {
     // Race against timeout
     return await Promise.race([
-      fetchPortfolioData(address, chain),
+      fetchPortfolioData(address, chain, onStatus),
       timeoutPromise
     ]);
   } catch (error) {
@@ -47,14 +52,24 @@ export const getPortfolio = async (address, chain = 'ethereum') => {
 /**
  * Internal function to fetch portfolio data
  */
-const fetchPortfolioData = async (address, chain) => {
+const fetchPortfolioData = async (address, chain, onStatus = () => {}) => {
   const portfolio = [];
 
+  onStatus('🔍 Fetching native balance & token list...');
+  
   // 1. Get native token balance and token list in parallel
   const [nativeBalance, tokens] = await Promise.all([
-    getEthBalance(address, chain).catch(() => 0),
-    getTokenBalances(address, chain).catch(() => [])
+    getEthBalance(address, chain).catch((e) => {
+      console.error('Native balance error:', e);
+      return 0;
+    }),
+    getTokenBalances(address, chain).catch((e) => {
+      console.error('Token list error:', e);
+      return [];
+    })
   ]);
+  
+  onStatus(`✅ Native balance: ${nativeBalance.toFixed(4)} | Found ${tokens.length} tokens`);
   
   const nativeSymbol = chain === 'polygon' ? 'MATIC' : chain === 'bsc' ? 'BNB' : 'ETH';
   
@@ -72,6 +87,8 @@ const fetchPortfolioData = async (address, chain) => {
   const limitedTokens = tokens.slice(0, 10); // Limit to 10 tokens for faster loading
   
   if (limitedTokens.length > 0) {
+    onStatus(`📊 Fetching balances for ${limitedTokens.length} tokens...`);
+    
     const tokenBalances = await getTokenBalancesBatch(address, limitedTokens, chain);
     
     for (const token of tokenBalances) {
@@ -85,11 +102,16 @@ const fetchPortfolioData = async (address, chain) => {
         });
       }
     }
+    
+    onStatus(`✅ Got ${portfolio.length - 1} token balances`);
   }
 
   // 3. Get prices for all tokens
+  onStatus('💰 Fetching prices from CoinGecko...');
   const symbols = portfolio.map(t => t.symbol);
   const prices = await getTokenPrices(symbols).catch(() => ({}));
+  
+  onStatus(`✅ Got prices for ${Object.keys(prices).length} tokens`);
 
   // 4. Combine data
   const portfolioWithPrices = portfolio.map(token => {
@@ -105,6 +127,8 @@ const fetchPortfolioData = async (address, chain) => {
     };
   });
 
+  onStatus('🎉 Portfolio loaded successfully!');
+  
   // Sort by value (highest first)
   return portfolioWithPrices.sort((a, b) => b.value - a.value);
 };
